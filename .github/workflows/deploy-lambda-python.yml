@@ -196,7 +196,8 @@ jobs:
           deploy_function() {
             local fn=$1 code=$2 zip=$3
             # A folder Terraform hasn't created a function for only matters if it has new code.
-            if [ "$code" = no ] && ! aws lambda get-function --function-name "$fn" > /dev/null 2>&1; then
+            if [ "$code" = no ] && ! retry aws lambda get-function --function-name "$fn" > /dev/null 2> "$RUNNER_TEMP/$fn.err"; then
+              grep -q ResourceNotFoundException "$RUNNER_TEMP/$fn.err" || { cat "$RUNNER_TEMP/$fn.err"; return 1; }
               echo "::warning::$fn does not exist, skipping layer update"
               return 0
             fi
@@ -209,7 +210,7 @@ jobs:
               # functions once (xomify #158). Matching the hash proves our zip is what runs.
               local want got
               want=$(openssl dgst -sha256 -binary "$zip" | base64)
-              got=$(aws lambda get-function-configuration --function-name "$fn" --query CodeSha256 --output text)
+              got=$(retry aws lambda get-function-configuration --function-name "$fn" --query CodeSha256 --output text) || return 1
               if [ "$want" != "$got" ]; then
                 echo "::error::$fn is running $got, not the deployed zip $want"
                 return 1
@@ -218,7 +219,7 @@ jobs:
 
             # Swap only this app's shared layer; other layers (xomper's duckdb) stay attached.
             local current others
-            current=$(aws lambda get-function-configuration --function-name "$fn" --query 'Layers[].Arn' --output text)
+            current=$(retry aws lambda get-function-configuration --function-name "$fn" --query 'Layers[].Arn' --output text) || return 1
             if ! grep -qxF "$LAYER" <<< "$(tr '\t' '\n' <<< "$current")"; then
               others=$(tr '\t' '\n' <<< "$current" | grep -v ":layer:$PREFIX-shared-packages:" | grep -v '^None$' || true)
               # shellcheck disable=SC2086
