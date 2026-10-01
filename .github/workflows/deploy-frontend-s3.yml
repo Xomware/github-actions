@@ -1,9 +1,8 @@
 # Build a static frontend and publish it to S3 behind CloudFront.
 # Before `build-command` runs, the env holds every secret in Infisical folder /<app> plus each
 # `ssm` entry, so the build (or a sed in front of it) can bake them in. HTML is uploaded
-# no-cache. Other files are cached for a year, so they must be content-hashed; set
-# `immutable-prefix` when only part of the output is (Next.js: `_next/static/`), and the rest
-# gets an hour.
+# no-cache and every other file is cached for a year, so filenames must be content-hashed.
+# `nextjs: true` handles a static export instead: see the Upload step.
 #
 # Caller must grant: contents: read, id-token: write.
 name: Deploy frontend
@@ -49,10 +48,10 @@ on:
         description: A CloudFront alias of the distribution to invalidate.
         required: true
         type: string
-      immutable-prefix:
-        description: Only files under this prefix are content-hashed. Empty means all non-HTML files are.
-        default: ''
-        type: string
+      nextjs:
+        description: The output is a Next.js static export.
+        default: false
+        type: boolean
 
 jobs:
   deploy:
@@ -106,19 +105,34 @@ jobs:
         env:
           DIST: ${{ inputs.dist-dir }}
           BUCKET: ${{ inputs.bucket }}
-          IMMUTABLE: ${{ inputs.immutable-prefix }}
+          NEXTJS: ${{ inputs.nextjs }}
         run: |
           set -euo pipefail
           year='public, max-age=31536000, immutable'
-          if [ -z "$IMMUTABLE" ]; then
+          fresh='no-cache, no-store, must-revalidate'
+          if [ "$NEXTJS" != true ]; then
             aws s3 sync "$DIST" "s3://$BUCKET" --delete --exclude '*.html' --cache-control "$year"
-          else
-            aws s3 sync "$DIST" "s3://$BUCKET" --delete --exclude '*' --include "$IMMUTABLE*" --cache-control "$year"
-            aws s3 sync "$DIST" "s3://$BUCKET" --delete --exclude '*.html' --exclude "$IMMUTABLE*" \
-              --cache-control 'public, max-age=3600'
+            aws s3 sync "$DIST" "s3://$BUCKET" --delete --exclude '*' --include '*.html' --cache-control "$fresh"
+            exit 0
           fi
-          aws s3 sync "$DIST" "s3://$BUCKET" --delete --exclude '*' --include '*.html' \
-            --cache-control 'no-cache, no-store, must-revalidate'
+
+          # Only _next/static/ is content-hashed. Hashed files go up first so no page lands
+          # before what it references, and nothing is deleted: a tab still on the previous
+          # build fetches that build's chunks on client navigation. The prune below clears them.
+          aws s3 sync "$DIST" "s3://$BUCKET" --exclude '*' --include '_next/static/*' --cache-control "$year"
+          # cp, not sync: sync skips an unchanged file and would leave its old Cache-Control.
+          aws s3 cp "$DIST" "s3://$BUCKET" --recursive --exclude '_next/static/*' --exclude '*.html' \
+            --exclude '*.txt' --cache-control 'public, max-age=300, must-revalidate'
+          # .txt files are the RSC payloads that client navigation fetches next to the HTML.
+          aws s3 sync "$DIST" "s3://$BUCKET" --exclude '*' --include '*.html' --include '*.txt' \
+            --cache-control "$fresh"
+
+          cutoff=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          aws s3api list-objects-v2 --bucket "$BUCKET" --prefix _next/static/ \
+            --query "Contents[?LastModified<'$cutoff'].Key" --output text \
+            | tr '\t' '\n' | { grep -v -e '^None$' -e '^$' || true; } | while read -r key; do
+                aws s3 rm "s3://$BUCKET/$key"
+              done
 
       - name: Invalidate CloudFront
         env:
