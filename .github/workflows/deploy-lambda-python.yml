@@ -1,0 +1,221 @@
+# Deploy Python Lambdas laid out as <root>/lambdas/<name>/ with shared code in lambdas/common.
+# - lambdas/common + requirements.txt are published as layer <prefix>-shared-packages.
+# - lambdas/<name> deploys to function <prefix>-<name with _ as ->.
+# - Push: deploys the lambdas whose folders changed. A change to common/ or requirements.txt
+#   republishes the layer and moves every function onto it.
+# - Manual run: deploys the listed lambdas, or rebuilds the layer and deploys all of them.
+# The AWS role comes from the Infisical folder /<app>.
+#
+# Caller must grant: contents: read, id-token: write.
+name: Deploy Lambdas
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Infisical folder, e.g. `xomify`.
+        required: true
+        type: string
+      function-prefix:
+        description: Function and layer name prefix. Defaults to `app`.
+        default: ''
+        type: string
+      root:
+        description: Directory holding `lambdas/` and `requirements.txt`.
+        default: .
+        type: string
+      python-version:
+        default: '3.12'
+        type: string
+      role-key:
+        description: Infisical secret holding the deploy role ARN.
+        default: AWS_BACKEND_ROLE_ARN
+        type: string
+      test-command:
+        description: Run in `root` after installing requirements, pytest and moto. Empty skips tests.
+        default: ''
+        type: string
+      lambdas:
+        description: Manual runs only. Comma-separated folder names; empty deploys all.
+        default: ''
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      lambdas: ${{ steps.diff.outputs.lambdas }}
+      layer: ${{ steps.diff.outputs.layer }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.root }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          REQUESTED: ${{ inputs.lambdas }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          all=$(find lambdas -mindepth 1 -maxdepth 1 -type d ! -name common ! -name __pycache__ -exec basename {} \; | sort)
+
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # Naming lambdas deploys just those onto the current layer; naming none
+            # rebuilds the layer and redeploys everything.
+            list=${REQUESTED:+$(tr ',' '\n' <<< "$REQUESTED" | xargs -n1)}
+            layer=false
+            [ -z "$list" ] && list=$all && layer=true
+          else
+            # A multi-commit push only deploys correctly if the diff spans the whole push,
+            # not just HEAD~1. `before` is all zeros on a branch's first push.
+            base=$BEFORE
+            [[ -z "$base" || "$base" =~ ^0+$ ]] && base=HEAD~1
+            changed=$(git diff --name-only --relative "$base" HEAD)
+            layer=false
+            grep -qE '^(lambdas/common/|requirements\.txt$)' <<< "$changed" && layer=true
+            # Deleted folders show up in the diff; Terraform removes those functions.
+            list=$(grep -oE '^lambdas/[^/]+/' <<< "$changed" | cut -d/ -f2 | sort -u \
+              | grep -vxE 'common|__pycache__' | while read -r l; do [ -d "lambdas/$l" ] && echo "$l"; done || true)
+          fi
+
+          echo "lambdas=$(jq -Rsc 'split("\n") | map(select(length > 0))' <<< "$list")" >> "$GITHUB_OUTPUT"
+          echo "layer=$layer" >> "$GITHUB_OUTPUT"
+          echo "layer=$layer lambdas: $(echo $list)"
+
+  test:
+    needs: changes
+    if: inputs.test-command != '' && (needs.changes.outputs.layer == 'true' || needs.changes.outputs.lambdas != '[]')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.root }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+      - run: pip install -q -r requirements.txt pytest moto boto3
+      - run: ${{ inputs.test-command }}
+
+  deploy:
+    needs: [changes, test]
+    if: >-
+      !cancelled() && needs.changes.result == 'success'
+      && (needs.test.result == 'success' || needs.test.result == 'skipped')
+      && (needs.changes.outputs.layer == 'true' || needs.changes.outputs.lambdas != '[]')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-lambdas-${{ github.repository }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ${{ inputs.root }}
+    env:
+      PREFIX: ${{ inputs.function-prefix || inputs.app }}
+      LAMBDAS: ${{ needs.changes.outputs.lambdas }}
+      LAYER_CHANGED: ${{ needs.changes.outputs.layer }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: Xomware/github-actions/actions/load-infisical-secrets@v1
+        with:
+          path: /${{ inputs.app }}
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env[inputs.role-key] }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Publish layer
+        if: env.LAYER_CHANGED == 'true'
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/layer/python/lambdas"
+          cp -r lambdas/common "$RUNNER_TEMP/layer/python/lambdas/"
+          touch "$RUNNER_TEMP/layer/python/lambdas/__init__.py"
+          pip install -q --platform manylinux2014_x86_64 --only-binary=:all: \
+            --python-version "$PYTHON_VERSION" -t "$RUNNER_TEMP/layer/python" -r requirements.txt
+          (cd "$RUNNER_TEMP/layer" && zip -qr ../layer.zip python -x '*__pycache__*')
+          aws lambda publish-layer-version --layer-name "$PREFIX-shared-packages" \
+            --zip-file "fileb://$RUNNER_TEMP/layer.zip" \
+            --compatible-runtimes "python$PYTHON_VERSION" --query LayerVersionArn --output text
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          # --no-paginate: --query applies per page, so paging returns one ARN per page.
+          LAYER=$(aws lambda list-layer-versions --layer-name "$PREFIX-shared-packages" --no-paginate \
+            --query 'LayerVersions[0].LayerVersionArn' --output text)
+          [[ "$LAYER" == arn:* ]] || { echo "::error::no published layer $PREFIX-shared-packages"; exit 1; }
+          export LAYER
+
+          # Throttling and the just-created-by-Terraform race both clear on their own.
+          retry() {
+            local delay=3
+            for attempt in 1 2 3 4 5; do
+              "$@" && return 0
+              [ "$attempt" = 5 ] && return 1
+              sleep "$delay"; delay=$((delay * 2))
+            done
+          }
+
+          deploy() {
+            local name=$1 code=$2 fn
+            fn="$PREFIX-${name//_/-}"
+            # A folder Terraform hasn't created a function for only matters if it has new code.
+            if [ "$code" = no ] && ! aws lambda get-function --function-name "$fn" > /dev/null 2>&1; then
+              echo "::warning::$fn does not exist, skipping layer update"
+              return 0
+            fi
+            if [ "$code" = yes ]; then
+              (cd "lambdas/$name" && zip -qr "$RUNNER_TEMP/$name.zip" . -x '*__pycache__*')
+              retry aws lambda update-function-code --function-name "$fn" \
+                --zip-file "fileb://$RUNNER_TEMP/$name.zip" > /dev/null || return 1
+              retry aws lambda wait function-updated --function-name "$fn" || return 1
+
+              # A green deploy that left Terraform's placeholder in place shipped dead
+              # functions once (xomify #158). Matching the hash proves our zip is what runs.
+              local want got
+              want=$(openssl dgst -sha256 -binary "$RUNNER_TEMP/$name.zip" | base64)
+              got=$(aws lambda get-function-configuration --function-name "$fn" --query CodeSha256 --output text)
+              if [ "$want" != "$got" ]; then
+                echo "::error::$fn is running $got, not the deployed zip $want"
+                return 1
+              fi
+            fi
+
+            # Swap only this app's shared layer; other layers (xomper's duckdb) stay attached.
+            local current others
+            current=$(aws lambda get-function-configuration --function-name "$fn" --query 'Layers[].Arn' --output text)
+            if ! grep -qxF "$LAYER" <<< "$(tr '\t' '\n' <<< "$current")"; then
+              others=$(tr '\t' '\n' <<< "$current" | grep -v ":layer:$PREFIX-shared-packages:" | grep -v '^None$' || true)
+              # shellcheck disable=SC2086
+              retry aws lambda update-function-configuration --function-name "$fn" --layers $others "$LAYER" > /dev/null || return 1
+              retry aws lambda wait function-updated --function-name "$fn" || return 1
+            fi
+
+            echo "$fn ok"
+          }
+          export -f retry deploy
+
+          targets=$(jq -r '.[] | "\(.) yes"' <<< "$LAMBDAS")
+          if [ "$LAYER_CHANGED" = true ]; then
+            # Every function moves to the new layer; only the changed ones get new code.
+            all=$(find lambdas -mindepth 1 -maxdepth 1 -type d ! -name common ! -name __pycache__ -exec basename {} \;)
+            unchanged=$(comm -23 <(sort <<< "$all") <(jq -r '.[]' <<< "$LAMBDAS" | sort) | sed 's/$/ no/')
+            targets=$(printf '%s\n%s' "$targets" "$unchanged")
+          fi
+
+          # Five at a time stays under the Lambda control-plane throttle.
+          grep -v '^$' <<< "$targets" | xargs -P 5 -L 1 bash -c 'deploy "$0" "$1"'
