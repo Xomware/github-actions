@@ -6,15 +6,25 @@ description: >-
 
 inputs:
   path:
-    description: Folder in the project, e.g. `/shared`, `/aws` or `/xomify`.
+    description: Folder in the project, e.g. `/shared` or `/xomify`.
     required: true
   environment:
     description: Infisical environment slug.
     default: prod
+  tf-vars:
+    description: >-
+      `true` also exports each secret as `TF_VAR_<lowercased name>`, so `CLIENT_SECRET` feeds
+      `variable "client_secret"`. Terraform ignores env vars for undeclared variables.
+    default: 'false'
 
 runs:
   using: composite
   steps:
+    - name: Snapshot env
+      if: inputs.tf-vars == 'true'
+      shell: bash
+      run: compgen -e | sort > "$RUNNER_TEMP/infisical-env-before"
+
     # Identity and project IDs aren't secrets. Defaulting them here is what lets callers pass
     # nothing, and avoids org variables, which GitHub Free doesn't expose to private repos.
     - uses: Infisical/secrets-action@d2e351f16c6ca20d17c85e6c992e04bdeb64e87d # v1.0.18
@@ -25,3 +35,17 @@ runs:
         env-slug: ${{ inputs.environment }}
         secret-path: ${{ inputs.path }}
         export-type: env
+
+    # The upstream action reports no list of what it loaded, so diff the env against the
+    # snapshot. Runner-internal names change between steps and are filtered out.
+    - name: Export as TF_VAR_*
+      if: inputs.tf-vars == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        comm -13 "$RUNNER_TEMP/infisical-env-before" <(compgen -e | sort) \
+          | grep -vE '^(GITHUB_|RUNNER_|ACTIONS_|INPUT_|STATE_)' \
+          | while IFS= read -r name; do
+              delim="EOF_$(openssl rand -hex 8)"
+              printf 'TF_VAR_%s<<%s\n%s\n%s\n' "${name,,}" "$delim" "${!name}" "$delim" >> "$GITHUB_ENV"
+            done
