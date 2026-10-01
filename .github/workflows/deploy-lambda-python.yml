@@ -3,7 +3,7 @@
 # - lambdas/<name> deploys to function <prefix>-<name with _ as ->.
 # - Push: deploys the lambdas whose folders changed. A change to common/ or requirements.txt
 #   republishes the layer and moves every function onto it.
-# - Manual run: deploys the listed lambdas, or all of them.
+# - Manual run: deploys the listed lambdas, or rebuilds the layer and deploys all of them.
 # The AWS role comes from the Infisical folder /<app>.
 #
 # Caller must grant: contents: read, id-token: write.
@@ -69,9 +69,11 @@ jobs:
           all=$(find lambdas -mindepth 1 -maxdepth 1 -type d ! -name common ! -name __pycache__ -exec basename {} \; | sort)
 
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # Naming lambdas deploys just those onto the current layer; naming none
+            # rebuilds the layer and redeploys everything.
             list=${REQUESTED:+$(tr ',' '\n' <<< "$REQUESTED" | xargs -n1)}
-            list=${list:-$all}
-            layer=true
+            layer=false
+            [ -z "$list" ] && list=$all && layer=true
           else
             # A multi-commit push only deploys correctly if the diff spans the whole push,
             # not just HEAD~1. `before` is all zeros on a branch's first push.
@@ -176,6 +178,11 @@ jobs:
           deploy() {
             local name=$1 code=$2 fn
             fn="$PREFIX-${name//_/-}"
+            # A folder Terraform hasn't created a function for only matters if it has new code.
+            if [ "$code" = no ] && ! aws lambda get-function --function-name "$fn" > /dev/null 2>&1; then
+              echo "::warning::$fn does not exist, skipping layer update"
+              return 0
+            fi
             if [ "$code" = yes ]; then
               (cd "lambdas/$name" && zip -qr "$RUNNER_TEMP/$name.zip" . -x '*__pycache__*')
               retry aws lambda update-function-code --function-name "$fn" \
