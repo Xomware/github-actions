@@ -1,0 +1,27 @@
+name: Load Infisical secrets
+description: >-
+  Export every secret in one folder of the Xomware `code` Infisical project as env vars for
+  the rest of the job. Authenticates with GitHub OIDC, so the caller stores no credentials.
+  The job must grant `permissions: id-token: write`.
+
+inputs:
+  path:
+    description: Folder in the project, e.g. `/shared`, `/aws` or `/xomify`.
+    required: true
+  environment:
+    description: Infisical environment slug.
+    default: prod
+
+runs:
+  using: composite
+  steps:
+    # Identity and project IDs aren't secrets. Defaulting them here is what lets callers pass
+    # nothing, and avoids org variables, which GitHub Free doesn't expose to private repos.
+    - uses: Infisical/secrets-action@d2e351f16c6ca20d17c85e6c992e04bdeb64e87d # v1.0.18
+      with:
+        method: oidc
+        identity-id: 5ae9eb95-e882-4529-aa69-72c70925d801
+        project-id: 93ea4d66-6e05-4111-a245-61d3e27c9d43
+        env-slug: ${{ inputs.environment }}
+        secret-path: ${{ inputs.path }}
+        export-type: env
