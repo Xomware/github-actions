@@ -39,6 +39,13 @@ on:
         description: Manual runs only. Comma-separated folder names; empty deploys all.
         default: ''
         type: string
+      function-names:
+        description: >-
+          Overrides for folders whose functions don't follow the naming rule, one
+          `folder=name [name...]` per line. Several names deploy the folder to each; no name
+          means the folder isn't a deployed function.
+        default: ''
+        type: string
 
 env:
   AWS_REGION: us-east-1
@@ -119,6 +126,7 @@ jobs:
       PREFIX: ${{ inputs.function-prefix || inputs.app }}
       LAMBDAS: ${{ needs.changes.outputs.lambdas }}
       LAYER_CHANGED: ${{ needs.changes.outputs.layer }}
+      FUNCTION_NAMES: ${{ inputs.function-names }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -144,8 +152,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/layer/python/lambdas"
           cp -r lambdas/common "$RUNNER_TEMP/layer/python/lambdas/"
           touch "$RUNNER_TEMP/layer/python/lambdas/__init__.py"
+          # The runtime ships boto3. A pinned copy in the layer would shadow it with an older one.
+          grep -viE '^(boto3|botocore)([=<>~! ]|$)' requirements.txt > "$RUNNER_TEMP/requirements.txt" || true
           pip install -q --platform manylinux2014_x86_64 --only-binary=:all: \
-            --python-version "$PYTHON_VERSION" -t "$RUNNER_TEMP/layer/python" -r requirements.txt
+            --python-version "$PYTHON_VERSION" -t "$RUNNER_TEMP/layer/python" -r "$RUNNER_TEMP/requirements.txt"
           (cd "$RUNNER_TEMP/layer" && zip -qr ../layer.zip python -x '*__pycache__*')
           aws lambda publish-layer-version --layer-name "$PREFIX-shared-packages" \
             --zip-file "fileb://$RUNNER_TEMP/layer.zip" \
@@ -171,24 +181,36 @@ jobs:
           }
 
           deploy() {
-            local name=$1 code=$2 fn
-            fn="$PREFIX-${name//_/-}"
+            local name=$1 code=$2 fns fn
+            fns="$PREFIX-${name//_/-}"
+            if grep -q "^$name=" <<< "$FUNCTION_NAMES"; then
+              fns=$(grep "^$name=" <<< "$FUNCTION_NAMES" | cut -d= -f2-)
+              [ -z "${fns// /}" ] && { echo "$name is not a deployed function"; return 0; }
+            fi
+            [ "$code" = yes ] && (cd "lambdas/$name" && zip -qr "$RUNNER_TEMP/$name.zip" . -x '*__pycache__*')
+            for fn in $fns; do
+              deploy_function "$fn" "$code" "$RUNNER_TEMP/$name.zip" || return 1
+            done
+          }
+
+          deploy_function() {
+            local fn=$1 code=$2 zip=$3
             # A folder Terraform hasn't created a function for only matters if it has new code.
-            if [ "$code" = no ] && ! aws lambda get-function --function-name "$fn" > /dev/null 2>&1; then
+            if [ "$code" = no ] && ! retry aws lambda get-function --function-name "$fn" > /dev/null 2> "$RUNNER_TEMP/$fn.err"; then
+              grep -q ResourceNotFoundException "$RUNNER_TEMP/$fn.err" || { cat "$RUNNER_TEMP/$fn.err"; return 1; }
               echo "::warning::$fn does not exist, skipping layer update"
               return 0
             fi
             if [ "$code" = yes ]; then
-              (cd "lambdas/$name" && zip -qr "$RUNNER_TEMP/$name.zip" . -x '*__pycache__*')
               retry aws lambda update-function-code --function-name "$fn" \
-                --zip-file "fileb://$RUNNER_TEMP/$name.zip" > /dev/null || return 1
+                --zip-file "fileb://$zip" > /dev/null || return 1
               retry aws lambda wait function-updated --function-name "$fn" || return 1
 
               # A green deploy that left Terraform's placeholder in place shipped dead
               # functions once (xomify #158). Matching the hash proves our zip is what runs.
               local want got
-              want=$(openssl dgst -sha256 -binary "$RUNNER_TEMP/$name.zip" | base64)
-              got=$(aws lambda get-function-configuration --function-name "$fn" --query CodeSha256 --output text)
+              want=$(openssl dgst -sha256 -binary "$zip" | base64)
+              got=$(retry aws lambda get-function-configuration --function-name "$fn" --query CodeSha256 --output text) || return 1
               if [ "$want" != "$got" ]; then
                 echo "::error::$fn is running $got, not the deployed zip $want"
                 return 1
@@ -197,7 +219,7 @@ jobs:
 
             # Swap only this app's shared layer; other layers (xomper's duckdb) stay attached.
             local current others
-            current=$(aws lambda get-function-configuration --function-name "$fn" --query 'Layers[].Arn' --output text)
+            current=$(retry aws lambda get-function-configuration --function-name "$fn" --query 'Layers[].Arn' --output text) || return 1
             if ! grep -qxF "$LAYER" <<< "$(tr '\t' '\n' <<< "$current")"; then
               others=$(tr '\t' '\n' <<< "$current" | grep -v ":layer:$PREFIX-shared-packages:" | grep -v '^None$' || true)
               # shellcheck disable=SC2086
@@ -207,7 +229,7 @@ jobs:
 
             echo "$fn ok"
           }
-          export -f retry deploy
+          export -f retry deploy deploy_function
 
           targets=$(jq -r '.[] | "\(.) yes"' <<< "$LAMBDAS")
           if [ "$LAYER_CHANGED" = true ]; then
