@@ -39,10 +39,6 @@ on:
         description: Manual runs only. Comma-separated folder names; empty deploys all.
         default: ''
         type: string
-      stub-code-size:
-        description: Deployed code smaller than this many bytes is still Terraform's placeholder.
-        default: 600
-        type: number
 
 env:
   AWS_REGION: us-east-1
@@ -123,7 +119,6 @@ jobs:
       PREFIX: ${{ inputs.function-prefix || inputs.app }}
       LAMBDAS: ${{ needs.changes.outputs.lambdas }}
       LAYER_CHANGED: ${{ needs.changes.outputs.layer }}
-      STUB_CODE_SIZE: ${{ inputs.stub-code-size }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -188,6 +183,16 @@ jobs:
               retry aws lambda update-function-code --function-name "$fn" \
                 --zip-file "fileb://$RUNNER_TEMP/$name.zip" > /dev/null
               retry aws lambda wait function-updated --function-name "$fn"
+
+              # A green deploy that left Terraform's placeholder in place shipped dead
+              # functions once (xomify #158). Matching the hash proves our zip is what runs.
+              local want got
+              want=$(openssl dgst -sha256 -binary "$RUNNER_TEMP/$name.zip" | base64)
+              got=$(aws lambda get-function-configuration --function-name "$fn" --query CodeSha256 --output text)
+              if [ "$want" != "$got" ]; then
+                echo "::error::$fn is running $got, not the deployed zip $want"
+                return 1
+              fi
             fi
 
             # Swap only this app's shared layer; other layers (xomper's duckdb) stay attached.
@@ -200,14 +205,6 @@ jobs:
               retry aws lambda wait function-updated --function-name "$fn"
             fi
 
-            # A green deploy that left Terraform's placeholder zip in place shipped dead
-            # functions once (xomify #158). Code size is the cheap proof it didn't.
-            local size
-            size=$(aws lambda get-function-configuration --function-name "$fn" --query CodeSize --output text)
-            if [ "$size" -lt "$STUB_CODE_SIZE" ]; then
-              echo "::error::$fn is ${size}B, still the Terraform placeholder"
-              return 1
-            fi
             echo "$fn ok"
           }
           export -f retry deploy
