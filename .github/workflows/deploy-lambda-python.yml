@@ -181,8 +181,8 @@ jobs:
             if [ "$code" = yes ]; then
               (cd "lambdas/$name" && zip -qr "$RUNNER_TEMP/$name.zip" . -x '*__pycache__*')
               retry aws lambda update-function-code --function-name "$fn" \
-                --zip-file "fileb://$RUNNER_TEMP/$name.zip" > /dev/null
-              retry aws lambda wait function-updated --function-name "$fn"
+                --zip-file "fileb://$RUNNER_TEMP/$name.zip" > /dev/null || return 1
+              retry aws lambda wait function-updated --function-name "$fn" || return 1
 
               # A green deploy that left Terraform's placeholder in place shipped dead
               # functions once (xomify #158). Matching the hash proves our zip is what runs.
@@ -201,8 +201,8 @@ jobs:
             if ! grep -qxF "$LAYER" <<< "$(tr '\t' '\n' <<< "$current")"; then
               others=$(tr '\t' '\n' <<< "$current" | grep -v ":layer:$PREFIX-shared-packages:" | grep -v '^None$' || true)
               # shellcheck disable=SC2086
-              retry aws lambda update-function-configuration --function-name "$fn" --layers $others "$LAYER" > /dev/null
-              retry aws lambda wait function-updated --function-name "$fn"
+              retry aws lambda update-function-configuration --function-name "$fn" --layers $others "$LAYER" > /dev/null || return 1
+              retry aws lambda wait function-updated --function-name "$fn" || return 1
             fi
 
             echo "$fn ok"
