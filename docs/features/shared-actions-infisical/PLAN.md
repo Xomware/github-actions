@@ -1,6 +1,6 @@
 # Shared GitHub Actions + Infisical
 
-Status: Ready
+Status: In progress
 Date: 2026-10-01
 
 ## Goal
@@ -14,6 +14,15 @@ Date: 2026-10-01
    the deploy, done.
 
 Lambdas are untouched: they keep reading SSM at runtime.
+
+## Progress (2026-10-01)
+
+- Done: action + OIDC identity (1), SSM/Lambda/Cognito values seeded into Infisical (2),
+  terraform.yml rolled out to 13 infra repos (6), deploy-lambda-python.yml piloted on xomify (5),
+  deploy-frontend-s3.yml piloted on xomware-frontend (4).
+- Blocked: xomper-infrastructure apply fails on the SNS APNs key; needs the original key
+  recovered from its GitHub secret (recovery run awaiting Dom's approval).
+- Left: remaining frontends/backends, iOS (8), deleting GitHub secrets (9).
 
 ## What exists today (survey, 2026-10-01)
 
