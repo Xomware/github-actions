@@ -85,7 +85,7 @@ jobs:
 
           echo "lambdas=$(jq -Rsc 'split("\n") | map(select(length > 0))' <<< "$list")" >> "$GITHUB_OUTPUT"
           echo "layer=$layer" >> "$GITHUB_OUTPUT"
-          echo "layer=$layer lambdas: $(echo $list)"
+          echo "layer=$layer lambdas: $(tr '\n' ' ' <<< "$list")"
 
   test:
     needs: changes
@@ -218,4 +218,5 @@ jobs:
           fi
 
           # Five at a time stays under the Lambda control-plane throttle.
+          # shellcheck disable=SC2016 # $0/$1 expand in the child bash, not here
           grep -v '^$' <<< "$targets" | xargs -P 5 -L 1 bash -c 'deploy "$0" "$1"'
