@@ -15,14 +15,19 @@ Date: 2026-10-01
 
 Lambdas are untouched: they keep reading SSM at runtime.
 
-## Progress (2026-10-01)
+## Progress (2026-10-02)
 
-- Done: action + OIDC identity (1), SSM/Lambda/Cognito values seeded into Infisical (2),
-  terraform.yml rolled out to 13 infra repos (6), deploy-lambda-python.yml piloted on xomify (5),
-  deploy-frontend-s3.yml piloted on xomware-frontend (4).
-- Blocked: xomper-infrastructure apply fails on the SNS APNs key; needs the original key
-  recovered from its GitHub secret (recovery run awaiting Dom's approval).
-- Left: remaining frontends/backends, iOS (8), deleting GitHub secrets (9).
+- Done:
+  - Steps 1–7 and 9.
+  - Every Terraform, frontend, backend and utility workflow in both orgs reads Infisical.
+  - 147 unreferenced GitHub secrets deleted.
+  - add-to-board and claude-issues removed from 31 repos.
+- xomper SNS APNs key: set by CLI with the team key (A5X4MKX38D); Terraform ignores it (provider bug).
+- Left:
+  - iOS (8): needs Apple's PLA accepted and the App Store Connect issuer ID.
+  - Held cleanup PRs: Float#106, xom-claude-mcp-tools#7 (pre-existing red CI).
+  - Org-level secrets unchecked (needs admin:org).
+  - Two active IAM user keys on domjgiordano.
 
 ## What exists today (survey, 2026-10-01)
 
