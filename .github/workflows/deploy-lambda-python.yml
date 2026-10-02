@@ -154,7 +154,12 @@ jobs:
           touch "$RUNNER_TEMP/layer/python/lambdas/__init__.py"
           # The runtime ships boto3. A pinned copy in the layer would shadow it with an older one.
           grep -viE '^(boto3|botocore)([=<>~! ]|$)' requirements.txt > "$RUNNER_TEMP/requirements.txt" || true
-          pip install -q --platform manylinux2014_x86_64 --only-binary=:all: \
+          # python3.12+ runs on Amazon Linux 2023 (glibc 2.34), which takes the manylinux_2_28
+          # wheels newer releases ship (pillow 12.3). python3.11 is on AL2 (glibc 2.26) and can't.
+          platforms=(--platform manylinux2014_x86_64)
+          [ "$(printf '%s\n' 3.12 "$PYTHON_VERSION" | sort -V | head -1)" = 3.12 ] \
+            && platforms+=(--platform manylinux_2_28_x86_64)
+          pip install -q "${platforms[@]}" --only-binary=:all: \
             --python-version "$PYTHON_VERSION" -t "$RUNNER_TEMP/layer/python" -r "$RUNNER_TEMP/requirements.txt"
           (cd "$RUNNER_TEMP/layer" && zip -qr ../layer.zip python -x '*__pycache__*')
           aws lambda publish-layer-version --layer-name "$PREFIX-shared-packages" \
