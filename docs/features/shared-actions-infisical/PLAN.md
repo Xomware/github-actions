@@ -1,6 +1,6 @@
 # Shared GitHub Actions + Infisical
 
-Status: In progress
+Status: Done
 Date: 2026-10-01
 
 ## Goal
@@ -15,19 +15,17 @@ Date: 2026-10-01
 
 Lambdas are untouched: they keep reading SSM at runtime.
 
-## Progress (2026-10-02)
+## Progress (2026-10-03)
 
-- Done:
-  - Steps 1–7 and 9.
-  - Every Terraform, frontend, backend and utility workflow in both orgs reads Infisical.
-  - 147 unreferenced GitHub secrets deleted.
-  - add-to-board and claude-issues removed from 31 repos.
+- Done: every step. Every deploy, Terraform, TestFlight and utility workflow in both orgs reads Infisical.
+- GitHub secrets: the 3 iOS repos and the Xomware org are cleared; only green-square's `GH_PAT` remains.
+- App Store Connect: key ZDDUD287XG (Admin; cloud signing needs it) and issuer in `/shared`.
+- iOS app config recovered from GitHub secrets into `/xomfit` and `/xomper` as `IOS_*`.
 - xomper SNS APNs key: set by CLI with the team key (A5X4MKX38D); Terraform ignores it (provider bug).
-- Left:
-  - iOS (8): needs Apple's PLA accepted and the App Store Connect issuer ID.
-  - Held cleanup PRs: Float#106, xom-claude-mcp-tools#7 (pre-existing red CI).
-  - Org-level secrets unchecked (needs admin:org).
-  - Two active IAM user keys on domjgiordano.
+- Follow-ups outside this plan:
+  - Delete the two deactivated IAM keys on domjgiordano after 2026-10-09.
+  - Move the Spotify token exchange server-side; the client secret still ships in xomify's JS.
+  - Retire xomtracks-frontend.
 
 ## What exists today (survey, 2026-10-01)
 
